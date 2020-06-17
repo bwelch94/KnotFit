@@ -235,7 +235,7 @@ def log_prior(theta):
     #a, b = xs - 5, xs + 5
     #c, d = ys - 5, ys + 5
     # Don't forget to change reff limits when changing from pixel to physical constraints
-    if 0 < amp < 5000 and 0 < reff < 5000 and 0 < n < 50:
+    if 0 < amp < 5000 and 0 < reff < 5000 and 0 < n < 10:
         return 0
     return -np.inf
     
@@ -273,7 +273,7 @@ def convolved(theta, **kwargs):
     star = kwargs["star"]
     xlo, xhi = 2700, 3100
     ylo, yhi = 1800, 2100
-    sersic = Sersic2D(amplitude=amp, r_eff=reff, n=4, x_0=xs, y_0=ys)
+    sersic = Sersic2D(amplitude=amp, r_eff=reff, n=n, x_0=xs, y_0=ys)
     #gauss = Gaussian2D(amp, xs, ys, reff, reff)
     xsscut = xss[ylo:yhi, xlo:xhi]
     ysscut = yss[ylo:yhi, xlo:xhi]
