@@ -10,6 +10,7 @@ from astropy.cosmology import FlatLambdaCDM
 from astropy.convolution import convolve, Gaussian2DKernel
 import emcee
 import scipy.special as sp
+from scipy.optimize import minimize
 
 
 def main():
@@ -50,31 +51,36 @@ def main():
     print('knot x:',x, 'knot y:', y)
     print()
 
-    knotmag = 1. / magnifinv[y,x]
-
     rmsfile = 'hlsp_relics_hst_wfc3ir-60mas_whl0137-08_f110w_rms.fits'
     rmsfile = os.path.join(indir, rmsfile)
     print('Generating ArgDict')
     argdict = initArgDict(rmsfile, imstamp, limits=(xlo,xhi,ylo,yhi), ax=ax, ay=ay,
-                          knotpos=knotpos, sourcegrid=(xss,yss), star=star, magnification=knotmag)
+                          knotpos=knotpos, sourcegrid=(xss,yss), star=star)
     
-    theta = np.array([0.001, 1., 1.]) #, x, y]) # parsec radius
+    theta = np.array([0.01, 1., 1.]) #, x, y]) # pixel radius
+    #theta = np.array([0.1, 0.1]) #for Gaussian profile
     print('Initial Parameters:')
     print('Flux:', theta[0])
     print('Radius (parsecs):', theta[1])
     print('Sersic index:', theta[2])
     print()
-    #theta = np.array([0.1, 0.1]) #for Gaussian profile
+    print('Beginning Maximum Likelihood Fit')
+    print()
+    sol = minimize(neg_lhood, theta, args=argdict, method='Nelder-Mead',
+                    options={'maxiter':2500})
+    print('Maximum Likelihood Estimate Complete!')
+    print(sol)
 
     mcmcdict = '/home/brian/Documents/JHU/lensing/knotfit/chains'
-    mcmc_outfile = 'lowknot_nopt_amp_rpix_5k_modelC.h5'
+    mcmc_outfile = 'lowknot_minimize_2k_z6twopt.h5'
     mcmc_outfile = os.path.join(mcmcdict,mcmc_outfile)
-    print('Output File: ', mcmc_outfile)
+    print('MCMC Chain Output File: ', mcmc_outfile)
     print()
     print('Beginning MCMC')
+    theta = sol.x
     nwalk = len(theta) * 2
     sampler = runMCMC(theta, argdict, nwalkers=nwalk, 
-                      niter=1000, outfile=mcmc_outfile)
+                      niter=2000, outfile=mcmc_outfile)
     
     return sampler
 
@@ -172,7 +178,7 @@ def starGen(imdata, starLoc, extent=15):
 
 
 def initArgDict(rmsfile, imstamp, limits, ax, ay,
-                knotpos, sourcegrid, star, magnification=1., delta=5):
+                knotpos, sourcegrid, star, delta=5):
     xlo, xhi, ylo, yhi = limits
     x, y = knotpos
     xs = x - ax[y, x]
@@ -188,7 +194,7 @@ def initArgDict(rmsfile, imstamp, limits, ax, ay,
     knotbounds = [datax-delta, datax+delta, datay-delta,datay+delta]
     knot = imstamp[datay-delta:datay+delta, datax-delta:datax+delta]
 
-    sigma = poisson(rms_cutout, knot, t_expose=5123.501098)
+    sigma = poisson(knot, t_expose=5123.501098)
     sigma += rms_cutout
 
     # Include in args: xs, ys, xss, yss, star, data, sigma=RMS
@@ -203,14 +209,13 @@ def initArgDict(rmsfile, imstamp, limits, ax, ay,
         "arcIm" : imstamp,
         "sigma" : sigma,
         "knotbounds" : knotbounds,
-        "magnification" : magnification
     }
     return argdict
 
 
 def runMCMC(theta_init, argdict, nwalkers=4, niter=500, outfile=None, **kwargs):
     ndim = len(theta_init)
-    pos = theta_init + 1e-5 * np.random.randn(nwalkers, ndim)
+    pos = theta_init + (0.1 * theta_init) * np.random.randn(nwalkers, ndim)
     
     if outfile:
         backend = emcee.backends.HDFBackend(outfile)
@@ -235,7 +240,7 @@ def log_prior(theta):
     #a, b = xs - 5, xs + 5
     #c, d = ys - 5, ys + 5
     # Don't forget to change reff limits when changing from pixel to physical constraints
-    if 0 < amp < 5000 and 0 < reff < 5000 and 0 < n < 10:
+    if 0 < amp < 50 and 0 < reff < 1000 and 0.1 < n < 10:
         return 0
     return -np.inf
     
@@ -243,8 +248,7 @@ def log_prior(theta):
 def log_likelihood(theta, **kwargs):
     chisq = chisquared(theta, **kwargs)
     sigma = kwargs["sigma"]
-    lhood = (1. / (sigma * np.sqrt(2.*np.pi))) * np.exp(-chisq / 2.)
-    log_lhood = np.log(lhood)
+    log_lhood = -np.log(sigma) - (1./2.) * np.log(2*np.pi) - (chisq / 2.)
     result = np.sum(log_lhood)
     return result
 
@@ -273,6 +277,8 @@ def convolved(theta, **kwargs):
     star = kwargs["star"]
     xlo, xhi = 2700, 3100
     ylo, yhi = 1800, 2100
+    #xlo, xhi = 3000, 3500 #macs0308
+    #ylo, yhi = 1500, 2000
     sersic = Sersic2D(amplitude=amp, r_eff=reff, n=n, x_0=xs, y_0=ys)
     #gauss = Gaussian2D(amp, xs, ys, reff, reff)
     xsscut = xss[ylo:yhi, xlo:xhi]
@@ -296,7 +302,7 @@ def preconv(theta, **kwargs):
     return amp, r_eff, n #, xs, ys
 
 
-def poisson(rms, flux_eps, t_expose, gain=1.):
+def poisson(flux_eps, t_expose, gain=1.):
     ix = tuple([flux_eps<0])
     flux_eps[ix] = 0. # remove zeros to avoid nans in sqrt
     flux_photon = flux_eps / gain
