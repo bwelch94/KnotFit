@@ -105,11 +105,17 @@ def initDeflection_Image(imagefile, deflectionFileX, deflectionFileY,
     ay = deflyHST / 0.06 # arcsec -> pixels
     
     # convert back to Dds / Ds = 1
-    Dds_Ds_in  = Dds_Ds(zlens, zsource_in)
-    Dds_Ds_out = Dds_Ds(zlens, zsource_out)
+    if zsource_in == 0:
+        Dds_Ds_out = Dds_Ds(zlens, zsource_out)
 
-    ax = ax / Dds_Ds_in * Dds_Ds_out
-    ay = ay / Dds_Ds_in * Dds_Ds_out
+        ax = ax * Dds_Ds_out
+        ay = ay * Dds_Ds_out
+    else:
+        Dds_Ds_in  = Dds_Ds(zlens, zsource_in)
+        Dds_Ds_out = Dds_Ds(zlens, zsource_out)
+
+        ax = ax / Dds_Ds_in * Dds_Ds_out
+        ay = ay / Dds_Ds_in * Dds_Ds_out
     
     return ax, ay, imdata
 
@@ -194,7 +200,8 @@ def initArgDict(rmsfile, imstamp, limits, ax, ay,
     knotbounds = [datax-delta, datax+delta, datay-delta,datay+delta]
     knot = imstamp[datay-delta:datay+delta, datax-delta:datax+delta]
 
-    sigma = poisson(knot, t_expose=5123.501098)
+    #sigma = poisson(knot, t_expose=5123.501098) #whl0137
+    sigma = poisson(knot, t_expose=4821.973725) #macs0308 
     sigma += rms_cutout
 
     # Include in args: xs, ys, xss, yss, star, data, sigma=RMS
@@ -209,13 +216,18 @@ def initArgDict(rmsfile, imstamp, limits, ax, ay,
         "arcIm" : imstamp,
         "sigma" : sigma,
         "knotbounds" : knotbounds,
+        "limits" : limits
     }
     return argdict
 
 
 def runMCMC(theta_init, argdict, nwalkers=4, niter=500, outfile=None, **kwargs):
     ndim = len(theta_init)
-    pos = theta_init + (0.1 * theta_init) * np.random.randn(nwalkers, ndim)
+    if min(theta_init) < 1e-5:
+        frac = 0.1 * min(theta_init)
+    else:
+        frac = 1e-5
+    pos = theta_init + frac * np.random.randn(nwalkers, ndim)
     
     if outfile:
         backend = emcee.backends.HDFBackend(outfile)
@@ -229,18 +241,26 @@ def runMCMC(theta_init, argdict, nwalkers=4, niter=500, outfile=None, **kwargs):
 
 
 def log_probability(theta, **kwargs):
-    pri = log_prior(theta)
+    pri = log_prior(theta, **kwargs)
     if not np.isfinite(pri):
         return -np.inf
     return pri + log_likelihood(theta,**kwargs)
     
 
-def log_prior(theta):
-    amp, reff, n = theta #, xs, ys = theta
-    #a, b = xs - 5, xs + 5
-    #c, d = ys - 5, ys + 5
+def log_prior(theta, **kwargs):
+    amp1, reff1, amp2, reff2, n2, x2, y2 = theta #BDW
+    #amp1, reff1, amp2, reff2, x2, y2 = theta
+    xs = kwargs["xs"]
+    ys = kwargs["ys"]
+    xmin, xmax = xs-15, xs+15
+    ymin, ymax = ys-15, ys+15
     # Don't forget to change reff limits when changing from pixel to physical constraints
-    if 0 < amp < 50 and 0 < reff < 1000 and 0.1 < n < 10:
+    #if 0 < amp1 < 50 and 0 < reff1 < 1000 and 0.1 < n1 < 10 and 0 < amp2 < 50 and 0 < reff2 < 1000 and 0.1 < n2 < 10:
+    if (
+        0 < amp1 < 500 and 0 < reff1 < 500 #and 0.1 < n1 < 10
+        and 0 < amp2 < 500 and 0 < reff2 < 500 and 0.1 < n2 < 10
+        and xmin < x2 < xmax and ymin < y2 < ymax
+        ):
         return 0
     return -np.inf
     
@@ -269,24 +289,28 @@ def chisquared(theta, **kwargs):
 
 
 def convolved(theta, **kwargs): 
-    amp, reff, n = theta #BDW
+    #amp1, reff1, n1 = theta #BDW
+    amp1, reff1, amp2, reff2, n2, x2, y2 = theta
     #amp, reff, n = preconv(theta, **kwargs) #, xs, ys
     #print(amp,reff, xs, ys)
     xs, ys = kwargs["xs"], kwargs["ys"]
+    #x2, y2 = xs-3, ys-3
     xss, yss = kwargs["xss"], kwargs["yss"]
     star = kwargs["star"]
-    xlo, xhi = 2700, 3100
-    ylo, yhi = 1800, 2100
-    #xlo, xhi = 3000, 3500 #macs0308
-    #ylo, yhi = 1500, 2000
-    sersic = Sersic2D(amplitude=amp, r_eff=reff, n=n, x_0=xs, y_0=ys)
-    #gauss = Gaussian2D(amp, xs, ys, reff, reff)
+    xlo, xhi, ylo, yhi = kwargs["limits"]
+    #sersic1 = Sersic2D(amplitude=amp1, r_eff=reff1, n=n1, x_0=xs, y_0=ys)
+    sersic2 = Sersic2D(amplitude=amp2, r_eff=reff2, n=n2, x_0=x2, y_0=y2)
+    gauss1 = Gaussian2D(amp1, x_mean=xs, y_mean=ys, x_stddev=reff1, y_stddev=reff1)
+    #gauss2 = Gaussian2D(amp2, x_mean=x2, y_mean=y2, x_stddev=reff2, y_stddev=reff2)
     xsscut = xss[ylo:yhi, xlo:xhi]
     ysscut = yss[ylo:yhi, xlo:xhi]
-    S1 = sersic(xsscut, ysscut).value
+    S1 = gauss1(xsscut, ysscut).value
+    S2 = sersic2(xsscut, ysscut).value
+    S1S2 = S1 + S2
+    #S1 = gauss1(xsscut, ysscut) + gauss2(xsscut, ysscut)
     #S1 = gauss(xsscut, ysscut).value
-    S1conv = convolve(S1, star)
-    return S1conv
+    S1conv = convolve(S1S2, star)
+    return S1S2#conv
 
 
 def preconv(theta, **kwargs):
