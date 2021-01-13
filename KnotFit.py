@@ -11,6 +11,8 @@ from astropy.convolution import convolve, Gaussian2DKernel
 import emcee
 import scipy.special as sp
 from scipy.optimize import minimize
+from scipy.interpolate import interp2d
+
 
 
 def main():
@@ -183,42 +185,6 @@ def starGen(imdata, starLoc, extent=15):
     return star
 
 
-def initArgDict(rmsfile, imstamp, limits, ax, ay,
-                knotpos, sourcegrid, star, delta=5):
-    xlo, xhi, ylo, yhi = limits
-    x, y = knotpos
-    xs = x - ax[y, x]
-    ys = y - ay[y, x]
-    xss, yss = sourcegrid
-    rmsfo = fits.open(rmsfile)
-    rms = rmsfo[0].data
-    rmscut = rms[ylo:yhi,xlo:xhi]
-    
-    datax, datay = x - xlo, y - ylo
-    
-    rms_cutout = rmscut[datay-delta:datay+delta, datax-delta:datax+delta]
-    knotbounds = [datax-delta, datax+delta, datay-delta,datay+delta]
-    knot = imstamp[datay-delta:datay+delta, datax-delta:datax+delta]
-
-    #sigma = poisson(knot, t_expose=5123.501098) #whl0137
-    sigma = poisson(knot, t_expose=4821.973725) #macs0308 
-    sigma += rms_cutout
-
-    # Include in args: xs, ys, xss, yss, star, data, sigma=RMS
-    argdict = {
-        "xs" : xs,
-        "ys" : ys,
-        "ax" : ax,
-        "ay" : ay,
-        "xss" : xss,
-        "yss" : yss,
-        "star" : star,
-        "arcIm" : imstamp,
-        "sigma" : sigma,
-        "knotbounds" : knotbounds,
-        "limits" : limits
-    }
-    return argdict
 
 
 def runMCMC(theta_init, argdict, nwalkers=4, niter=500, outfile=None, **kwargs):
@@ -248,18 +214,19 @@ def log_probability(theta, **kwargs):
     
 
 def log_prior(theta, **kwargs):
-    amp1, reff1, amp2, reff2, n2, x2, y2 = theta #BDW
-    #amp1, reff1, amp2, reff2, x2, y2 = theta
+    amp1, reff1, amp2, reff2 = theta#, amp3, reff3 = theta
     xs = kwargs["xs"]
     ys = kwargs["ys"]
-    xmin, xmax = xs-15, xs+15
-    ymin, ymax = ys-15, ys+15
+    #xmin, xmax = x2-3, x2+3
+    #ymin, ymax = y2-3, y2+3
     # Don't forget to change reff limits when changing from pixel to physical constraints
     #if 0 < amp1 < 50 and 0 < reff1 < 1000 and 0.1 < n1 < 10 and 0 < amp2 < 50 and 0 < reff2 < 1000 and 0.1 < n2 < 10:
     if (
-        0 < amp1 < 500 and 0 < reff1 < 500 #and 0.1 < n1 < 10
-        and 0 < amp2 < 500 and 0 < reff2 < 500 and 0.1 < n2 < 10
-        and xmin < x2 < xmax and ymin < y2 < ymax
+        0 < amp1 < 50000 and 0. < reff1 < 500 #and 0.1 < n1 < 10
+        and 0 < amp2 < 500 and 0 < reff2 < 500 #and 0.1 < n2 < 10
+        #and 0 < amp3 < 500 and 0 < reff3 < 500 #and 0.1 < n3 < 10
+        #and 0 < amp4 < 500 and 0 < reff4 < 500 #and 0.1 < n4 < 10
+        #and xmin < x2 < xmax and ymin < y2 < ymax
         ):
         return 0
     return -np.inf
@@ -277,40 +244,37 @@ def chisquared(theta, **kwargs):
     sigma = kwargs["sigma"]
     arcIm = kwargs["arcIm"]
     simIm = np.zeros_like(arcIm)
+    # make simulated knot
     conv = convolved(theta, **kwargs)
     simIm[:,:] += conv[:,:] # add sim image to data image
-    # cut out each knot
-    knotbounds = kwargs["knotbounds"]
-    trueKnot = arcIm[knotbounds[2]:knotbounds[3], knotbounds[0]:knotbounds[1]]
-    simKnot = simIm[knotbounds[2]:knotbounds[3], knotbounds[0]:knotbounds[1]]
     # chisquared calculation
-    result = (1/sigma**2) * (trueKnot - simKnot)**2
+    result = (1/sigma**2) * (arcIm - simIm)**2
     return result
 
 
 def convolved(theta, **kwargs): 
-    #amp1, reff1, n1 = theta #BDW
-    amp1, reff1, amp2, reff2, n2, x2, y2 = theta
-    #amp, reff, n = preconv(theta, **kwargs) #, xs, ys
-    #print(amp,reff, xs, ys)
+    amp1, reff1, amp2, reff2 = theta #, amp3, reff3, amp4, reff4 = theta #
     xs, ys = kwargs["xs"], kwargs["ys"]
-    #x2, y2 = xs-3, ys-3
+    xs2, ys2 = kwargs["xs2"], kwargs["ys2"]
+    #xs3, ys3 = kwargs["xs3"], kwargs["ys3"]
+    #xs4, ys4 = kwargs["xs4"], kwargs["ys4"]
+    arcIm = kwargs["arcIm"]
+    #x2, y2 = 4013.63699909436, 4780.744281984086 # z10
+    #x3, y3 = 4016.430463104877, 4783.919833222558 # z10
     xss, yss = kwargs["xss"], kwargs["yss"]
     star = kwargs["star"]
-    xlo, xhi, ylo, yhi = kwargs["limits"]
     #sersic1 = Sersic2D(amplitude=amp1, r_eff=reff1, n=n1, x_0=xs, y_0=ys)
-    sersic2 = Sersic2D(amplitude=amp2, r_eff=reff2, n=n2, x_0=x2, y_0=y2)
+    #sersic2 = Sersic2D(amplitude=amp2, r_eff=reff2, n=n2, x_0=xs2, y_0=ys2)
+    #sersic3 = Sersic2D(amplitude=amp3, r_eff=reff3, n=n3, x_0=x3, y_0=y3)
     gauss1 = Gaussian2D(amp1, x_mean=xs, y_mean=ys, x_stddev=reff1, y_stddev=reff1)
-    #gauss2 = Gaussian2D(amp2, x_mean=x2, y_mean=y2, x_stddev=reff2, y_stddev=reff2)
-    xsscut = xss[ylo:yhi, xlo:xhi]
-    ysscut = yss[ylo:yhi, xlo:xhi]
-    S1 = gauss1(xsscut, ysscut).value
-    S2 = sersic2(xsscut, ysscut).value
-    S1S2 = S1 + S2
-    #S1 = gauss1(xsscut, ysscut) + gauss2(xsscut, ysscut)
-    #S1 = gauss(xsscut, ysscut).value
+    gauss2 = Gaussian2D(amp2, x_mean=xs2, y_mean=ys2, x_stddev=reff2, y_stddev=reff2)
+    #gauss3 = Gaussian2D(amp3, x_mean=xs3, y_mean=ys3, x_stddev=reff3, y_stddev=reff3)
+    #gauss4 = Gaussian2D(amp4, x_mean=xs4, y_mean=ys4, x_stddev=reff4, y_stddev=reff4)
+    combined =  gauss1 + gauss2 #+ gauss3 #+ gauss4
+    S1S2_hires = combined(xss, yss)
+    S1S2 = rebin(S1S2_hires, arcIm.shape)
     S1conv = convolve(S1S2, star)
-    return S1S2#conv
+    return S1conv
 
 
 def preconv(theta, **kwargs):
@@ -354,3 +318,9 @@ def pix_to_pc(rpix, z):
     r_pc = theta * DA #phys
     return r_pc
 
+def rebin(a, shape):
+    """
+    Re-bin hi-resolution simulated image to lower (HST) resolution. 
+    """
+    sh = shape[0], a.shape[0]//shape[0], shape[1], a.shape[1]//shape[1]
+    return a.reshape(sh).mean(-1).mean(1)
