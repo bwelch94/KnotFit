@@ -12,7 +12,7 @@ import emcee
 import scipy.special as sp
 from scipy.optimize import minimize
 from scipy.interpolate import interp2d
-
+# added inconsequential edit to test github auth
 
 
 def main():
