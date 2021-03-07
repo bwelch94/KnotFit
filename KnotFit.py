@@ -12,6 +12,7 @@ import emcee
 import scipy.special as sp
 from scipy.optimize import minimize
 from scipy.interpolate import interp2d
+from multiprocessing import Pool
 # added inconsequential edit to test github auth
 
 
@@ -187,7 +188,8 @@ def starGen(imdata, starLoc, extent=15):
 
 
 
-def runMCMC(theta_init, argdict, nwalkers=4, niter=500, outfile=None, **kwargs):
+def runMCMC(theta_init, argdict, nwalkers=4, niter=500, outfile=None, multiprocess=False, 
+            threshold_converged=100, min_improvement=0.01, full_output=False, **kwargs):
     ndim = len(theta_init)
     if min(theta_init) < 1e-5:
         frac = 0.1 * min(theta_init)
@@ -198,12 +200,36 @@ def runMCMC(theta_init, argdict, nwalkers=4, niter=500, outfile=None, **kwargs):
     if outfile:
         backend = emcee.backends.HDFBackend(outfile)
         backend.reset(nwalkers,ndim)
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability, kwargs=argdict, backend=backend)
     else:
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability, kwargs=argdict)
-    
-    sampler.run_mcmc(pos, niter, progress=True)
-    return sampler
+        backend = None
+
+    index = 0
+    autocorr = np.empty(niter)
+    old_tau = np.inf 
+
+    if multiprocess == True:
+        with Pool() as pool:
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability, kwargs=argdict, backend=backend, pool=pool)
+            sampler.run_mcmc(pos, niter, progress=True)
+    else:
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability, kwargs=argdict, backend=backend)    
+        #sampler.run_mcmc(pos, niter, progress=True)
+        for sample in sampler.sample(pos, iterations=niter, progress=True):
+            if sampler.iteration % 100:
+                continue
+            tau = sampler.get_autocorr_time(tol=0)
+            autocorr[index] = np.mean(tau)
+            index += 1
+
+            converged = np.all(tau * threshold_converged < sampler.iteration)
+            converged &= np.all(np.abs(old_tau - tau) / tau < min_improvement)
+            if converged:
+                break
+            old_tau = tau
+    if full_output:
+        return sampler, autocorr, index
+    else:
+        return sampler
 
 
 def log_probability(theta, **kwargs):
@@ -214,7 +240,7 @@ def log_probability(theta, **kwargs):
     
 
 def log_prior(theta, **kwargs):
-    amp1, reff1, amp2, reff2 = theta#, amp3, reff3 = theta
+    amp1, reff1 = theta#, amp2, reff2 = theta#, amp3, reff3 = theta
     xs = kwargs["xs"]
     ys = kwargs["ys"]
     #xmin, xmax = x2-3, x2+3
@@ -222,8 +248,8 @@ def log_prior(theta, **kwargs):
     # Don't forget to change reff limits when changing from pixel to physical constraints
     #if 0 < amp1 < 50 and 0 < reff1 < 1000 and 0.1 < n1 < 10 and 0 < amp2 < 50 and 0 < reff2 < 1000 and 0.1 < n2 < 10:
     if (
-        0 < amp1 < 50000 and 0. < reff1 < 500 #and 0.1 < n1 < 10
-        and 0 < amp2 < 500 and 0 < reff2 < 500 #and 0.1 < n2 < 10
+        0 < amp1 < 5000000 and 0. < reff1 < 500 #and 0.1 < n1 < 10
+        #and 0 < amp2 < 500 and 0 < reff2 < 500 #and 0.1 < n2 < 10
         #and 0 < amp3 < 500 and 0 < reff3 < 500 #and 0.1 < n3 < 10
         #and 0 < amp4 < 500 and 0 < reff4 < 500 #and 0.1 < n4 < 10
         #and xmin < x2 < xmax and ymin < y2 < ymax
@@ -271,10 +297,25 @@ def convolved(theta, **kwargs):
     #gauss3 = Gaussian2D(amp3, x_mean=xs3, y_mean=ys3, x_stddev=reff3, y_stddev=reff3)
     #gauss4 = Gaussian2D(amp4, x_mean=xs4, y_mean=ys4, x_stddev=reff4, y_stddev=reff4)
     combined =  gauss1 + gauss2 #+ gauss3 #+ gauss4
-    S1S2_hires = combined(xss, yss)
-    S1S2 = rebin(S1S2_hires, arcIm.shape)
+    #S1S2_hires = gauss2d(xss, yss, amplitude=amp1, x_mean=xs, y_mean=ys, x_stddev=reff1, y_stddev=reff1, theta=0) 
+    S1S2 = combined(xss, yss)
+    #S1S2 = rebin(S1S2_hires, arcIm.shape)
     S1conv = convolve(S1S2, star)
     return S1conv
+
+
+def gauss2d(x, y, amplitude, x_mean, y_mean, x_stddev, y_stddev, theta):
+    cost2 = np.cos(theta) ** 2
+    sint2 = np.sin(theta) ** 2
+    sin2t = np.sin(2. * theta)
+    xstd2 = x_stddev ** 2
+    ystd2 = y_stddev ** 2
+    xdiff = x - x_mean
+    ydiff = y - y_mean
+    a = 0.5 * ((cost2 / xstd2) + (sint2 / ystd2))
+    b = 0.5 * ((sin2t / xstd2) - (sin2t / ystd2))
+    c = 0.5 * ((sint2 / xstd2) + (cost2 / ystd2))
+    return amplitude * np.exp(-((a * xdiff ** 2) + (b * xdiff * ydiff) + (c * ydiff ** 2)))
 
 
 def preconv(theta, **kwargs):
