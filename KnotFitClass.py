@@ -274,42 +274,80 @@ class GalModel:
 
 class Clump:
 
-    def __init__(self, x0, y0, amp0=1., r0=1.):
+    def __init__(self, x0, y0, amp0=1., r0=1., profile="Gaussian"):
         self.x = x0
         self.y = y0
         self.amp = amp0
         self.r = r0
-        self.theta = np.array([amp0, r0])
+        if profile == "Gaussian":
+            self.theta = np.array([amp0, r0])
+        elif profile == "Delta":
+            self.theta = np.array([x0, y0, amp0])
         self.fixed = False
+        self.profile = profile
 
     def draw(self):
-        return Gaussian2D(self.amp, x_mean=self.x, y_mean=self.y,
-                            x_stddev=self.r, y_stddev=self.r)
+        if self.profile == 'Gaussian':
+            return Gaussian2D(self.amp, x_mean=self.x, y_mean=self.y,
+                                x_stddev=self.r, y_stddev=self.r)
+        elif self.profile == 'Delta':
+            return Delta2D(self.x, self.y, self.amp)
 
 
     def prior(self):
-        if (self.amin < self.amp < self.amax and self.rmin < self.r < self.rmax):
-            return 0
-        return -np.inf 
+        if self.profile == "Gaussian":
+            if (self.amin < self.amp < self.amax and self.rmin < self.r < self.rmax):
+                return 0
+            return -np.inf 
+        elif self.profile == "Delta":
+            if (self.amin < self.amp < self.amax and self.xmin < self.x < self.xmax and self.ymin < self.y < self.ymax):
+                return 0
+            return -np.inf
 
 
-    def set_prior(self, amin, amax, rmin, rmax):
+    def set_prior(self, amin=0, amax=1e10, rmin=0, rmax=1e10, xmin=0, xmax=1e10, ymin=0, ymax=1e10):
         self.amin = amin
         self.amax = amax
         self.rmin = rmin
         self.rmax = rmax
+        self.xmin = xmin
+        self.xmax = xmax
+        self.ymin = ymin
+        self.ymax = ymax
 
     def update(self, theta):
         if self.fixed:
             pass
         else:
             self.theta = theta
-            # if self.profile == "Gaussian":
-            self.amp = theta[0]
-            self.r = theta[1]
+            if self.profile == "Gaussian":
+                self.amp = theta[0]
+                self.r = theta[1]
+            elif self.profile == "Delta":
+                self.x = theta[0]
+                self.y = theta[1]
+                self.amp = theta[2]
 
     def get_num_params(self):
         return len(self.theta)
 
 
     
+
+
+class Delta2D:
+    def __init__(self, x0=0, y0=0, amp=1):
+        self.x0 = x0
+        self.y0 = y0
+        self.amp = amp
+
+    @staticmethod
+    def evaluate(xx, yy, x0, y0, amp):
+        delta_x = 0.01#(max(xx[0]) - min(xx[0])) / len(xx[0])
+        delta_y = 0.01#(max(yy[:][0]) - min(yy[:][0])) / len(yy[0])
+        result = np.zeros(xx.shape)
+        result[(xx>=x0-delta_x) & (xx<=x0+delta_x) & (yy>=y0-delta_y) & (yy<=y0+delta_y)] = amp
+        return result
+    
+    def __call__(self, xx, yy):
+        return self.evaluate(xx, yy, self.x0, self.y0, self.amp)
