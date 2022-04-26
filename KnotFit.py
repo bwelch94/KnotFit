@@ -304,6 +304,30 @@ def convolved(theta, **kwargs):
     return S1conv
 
 
+def convolved_TEST(theta, **kwargs): 
+    # assume you have a list called "clumps" with instances of Clump class (I think this should work?)
+    clumps = kwards["clumps"]
+    ind = 0
+    for i in range(len(clumps)):
+        n_params = clumps[i].get_num_params()
+        clumps[i].update(theta[ind:ind+n_params])
+        ind += n_params
+    combined = clumps[0].draw()
+    if len(clumps) > 1:
+        for i in range(1,len(clumps)):
+            combined += clumps[i].draw()
+    arcIm = kwargs["arcIm"]
+    xss, yss = kwargs["xss"], kwargs["yss"]
+    psf = kwargs["psf"]
+    if kwargs["resolution"] == 'high':
+        galaxy = combined(xss, yss)
+        galaxy_rebin = rebin(galaxy, arcim.shape)
+        return convolve(galaxy_rebin, psf)
+    else:
+        galaxy = combined(xss, yss)
+        return convolve(galaxy, psf)
+
+
 def gauss2d(x, y, amplitude, x_mean, y_mean, x_stddev, y_stddev, theta):
     cost2 = np.cos(theta) ** 2
     sint2 = np.sin(theta) ** 2
