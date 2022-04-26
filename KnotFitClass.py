@@ -5,8 +5,7 @@ We'll see how this goes...
 
 
 TO-DO:
-- Use combination of all stars in the field to avoid weird lopsided thing you're seeing now
-- Test this whole class structure thing
+ - figure out multiprocessing within the class structure?
 
 '''
 
@@ -24,6 +23,99 @@ import scipy.special as sp
 from scipy.optimize import minimize
 from scipy.interpolate import interp2d
 from multiprocessing import Pool
+from scipy.integrate import dblquad
+
+# Define functions for fitting outside of class structure
+# its a bit ugly, but this helps with parallelization of the MCMC
+
+def log_probability(theta, **kwargs):
+    pri = log_prior(theta, **kwargs)
+    if not np.isfinite(pri):
+        return -np.inf
+    return pri + log_likelihood(theta,**kwargs)
+    
+
+def log_prior(theta, **kwargs):
+    clumps = kwargs["clumps"]
+    ind = 0
+    for i in range(len(clumps)):
+        n_params = clumps[i].get_num_params()
+        clumps[i].update(theta[ind:ind+n_params])
+        ind += n_params
+    priors = sum([clump.prior() for clump in clumps])    
+    return priors
+
+def log_likelihood(theta, **kwargs):
+    chisq = chisquared(theta, **kwargs)
+    sigma = kwargs["sigma"]
+    log_lhood = -np.log(sigma) - (1./2.) * np.log(2*np.pi) - (chisq / 2.)
+    result = np.sum(log_lhood)
+    return result
+
+
+def chisquared(theta, **kwargs):
+    sigma = kwargs["sigma"]
+    arcim = kwargs["arcim"]
+    simim = np.zeros_like(arcim)
+    simim -= 4.
+    # make simulated knot
+    conv = convolved(theta, **kwargs)
+    simim[:,:] += conv[:,:] # add sim image to data image
+    # chisquared calculation
+    result = (1/sigma**2) * (arcim - simim)**2
+    return result
+
+
+
+def convolved(theta, **kwargs): 
+    # assume you have a list called "clumps" with instances of Clump class (I think this should work?)
+    clumps = kwargs["clumps"]
+    ind = 0
+    for i in range(len(clumps)):
+        n_params = clumps[i].get_num_params()
+        clumps[i].update(theta[ind:ind+n_params])
+        ind += n_params
+    combined = clumps[0].draw()
+    if len(clumps) > 1:
+        for i in range(1,len(clumps)):
+            combined += clumps[i].draw()
+    arcim = kwargs["arcim"]
+    xss, yss = kwargs["xss"], kwargs["yss"]
+    psf = kwargs["psf"]
+    resol = kwargs["resolution"]
+    if resol == 'high':
+        galaxy = combined(xss, yss)
+        galaxy_rebin = rebin(galaxy, arcim.shape)
+        return convolve(galaxy_rebin, psf)
+
+    elif resol == 'mixed': # be sure to run init_mixed_resolution before using this method!
+    # this gets suuuuper slow for now. I'll probably need to multiprocess to get this done in a reasonable time. Blarg!
+        xss_hires = kwargs["xss_hires"]
+        yss_hires = kwargs["yss_hires"]
+        xslice_hires = kwargs["xslice_hires"]
+        yslice_hires = kwargs["yslice_hires"]
+        galaxy = combined(xss, yss)
+        galaxy_hires = combined(xss_hires, yss_hires)
+        if kwargs["super_res"]:
+            galaxy = rebin(galaxy, arcim.shape)
+            galaxy_rebin = galaxy_hires.mean() 
+        else:
+            galaxy_rebin = rebin(galaxy_hires, hires_im.shape)
+        galaxy[yslice_hires, xslice_hires] = galaxy_rebin
+        return convolve(galaxy, psf)
+
+    else:
+        galaxy = combined(xss, yss)
+        return convolve(galaxy, psf)
+
+
+def rebin(a, shape):
+    """
+    Re-bin hi-resolution simulated image to lower (HST) resolution. 
+    """
+    sh = shape[0], a.shape[0]//shape[0], shape[1], a.shape[1]//shape[1]
+    return a.reshape(sh).mean(-1).mean(1)
+
 
 
 
@@ -94,7 +186,7 @@ class GalModel:
             rmsf = fits.open(rmsfile)
             rms = rmsf[0].data
             rmscut = rms[self.ylo:self.yhi, self.xlo:self.xhi]
-            self.sigma = self.poisson(self.arcim, t_expose=exp_time) + rmscut
+            self.sigma = self.poisson(np.copy(self.arcim), t_expose=exp_time) + (rmscut*exp_time)
         else:
             self.sigma = sig
 
@@ -103,8 +195,8 @@ class GalModel:
         ix = tuple([flux_eps<0])
         flux_eps[ix] = 0. # remove zeros to avoid nans in sqrt
         flux_photon = flux_eps / gain
-        Nphoton = flux_photon * t_expose
-        result = np.sqrt(Nphoton) / t_expose
+        Nphoton = flux_photon #* t_expose
+        result = np.sqrt(Nphoton) #/ t_expose
         return result 
 
 
@@ -159,20 +251,32 @@ class GalModel:
         if len(self.clumps) > 1:
             for i in range(1,len(self.clumps)):
                 combined += self.clumps[i].draw()
-        galaxy = combined(self.xss, self.yss)
 
         if self.resolution == 'high':
+            galaxy = combined(self.xss, self.yss)
             galaxy_rebin = self.rebin(galaxy, self.arcim.shape)
             return convolve(galaxy_rebin, self.psf)
 
         elif self.resolution == 'mixed': # be sure to run init_mixed_resolution before using this method!
         # this gets suuuuper slow for now. I'll probably need to multiprocess to get this done in a reasonable time. Blarg!
+            galaxy = combined(self.xss, self.yss)
             galaxy_hires = combined(self.xss_hires, self.yss_hires)
-            galaxy_rebin = self.rebin(galaxy_hires, self.hires_im.shape)
+            if self.super_res:
+                galaxy = self.rebin(galaxy, self.arcim.shape)
+                #print(galaxy_hires.shape, galaxy_hires.sum(), galaxy_hires.mean())
+                galaxy_rebin = galaxy_hires.mean() #/ galaxy_hires.shape[0]
+            else:
+                galaxy_rebin = self.rebin(galaxy_hires, self.hires_im.shape)
             galaxy[self.yslice_hires, self.xslice_hires] = galaxy_rebin
             return convolve(galaxy, self.psf)
 
+#        elif self.resolution == 'integrate':
+#            # this will be glacially slow. 
+#            galaxy = self.discretize_integrate_2D(combined)
+#            return convolve(galaxy, self.psf)
+
         else:
+            galaxy = combined(self.xss, self.yss)
             return convolve(galaxy, self.psf)
 
 
@@ -182,6 +286,33 @@ class GalModel:
         """
         sh = shape[0], a.shape[0]//shape[0], shape[1], a.shape[1]//shape[1]
         return a.reshape(sh).mean(-1).mean(1)
+
+
+    def discretize_integrate_2D(self, model):
+        """
+        Discretize model by integrating the model over the pixel.
+        """
+        # Set up grid
+        #x = np.arange(x_range[0] - 0.5, x_range[1] + 0.5)
+        #y = np.arange(y_range[0] - 0.5, y_range[1] + 0.5)
+        x = self.xss
+        y = self.yss
+        values = np.empty((y.shape[0] - 1, x.shape[1] - 1))
+
+     # Integrate over all pixels
+        #print(values.shape, x.shape, y.shape)
+        for i in range(x.shape[1] - 1):
+            for j in range(y.shape[0] - 1):
+                #print(x[i, j], x[i+1, j+1], y[i, j], y[i+1, j+1])
+                values[j, i] = np.abs(dblquad(lambda y, x: model(x, y), x[i, j], x[i + 1, j+1],
+                                    lambda x: y[i, j], lambda x: y[i+1, j + 1])[0])
+        return values   
+
+
+#    def init_integrate_grid(x_range, y_range, resolution):
+#        x_hires = np.arange(xlo - (resolution/2.), xhi - (resolution/2.), resolution)
+#        y_hires = np.arange(ylo - (resolution/2.), yhi - (resolution/2.), resolution)
+
 
 
     def init_mixed_resolution(self, res, xlo_hires, xhi_hires, ylo_hires, yhi_hires, xx, yy, ax, ay):
@@ -202,6 +333,33 @@ class GalModel:
         ay_hires = ay_interp(x_hires, y_hires)
         self.xss_hires = xx_hires - ax_hires
         self.yss_hires = yy_hires - ay_hires
+
+
+    def init_mixed_v2(self, xlo_hires, xhi_hires, ylo_hires, yhi_hires, xss_hires, yss_hires):
+        self.xslice_hires = slice(xlo_hires - self.xlo, xhi_hires - self.xlo)
+        self.yslice_hires = slice(ylo_hires - self.ylo, yhi_hires - self.ylo)
+
+        self.xss_hires = xss_hires
+        self.yss_hires = yss_hires
+
+
+    def build_kwarg_dict(self):
+        argdict = {
+                    "clumps"     : self.clumps,
+                    "sigma"      : self.sigma, 
+                    "arcim"      : self.arcim,
+                    "psf"        : self.psf,
+                    "resolution" : self.resolution,
+                    "xss"        : self.xss,
+                    "yss"        : self.yss
+        }
+        if self.resolution == 'mixed':
+            argdict["xss_hires"]    = self.xss_hires
+            argdict["yss_hires"]    = self.yss_hires
+            argdict["xslice_hires"] = self.xslice_hires
+            argdict["yslice_hires"] = self.yslice_hires
+
+        return argdict
 
 
 
@@ -231,8 +389,9 @@ class GalModel:
         if multiprocess:
             if n_core == None:
                 n_core = len(os.sched_getaffinity(0)) # returns number of CPU cores that current process can use
+            argdict = self.build_kwarg_dict()
             with Pool(n_core) as pool:
-                sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_probability, backend=backend, pool=pool)
+                sampler = emcee.EnsembleSampler(nwalkers, ndim, log_probability, kwargs=argdict, backend=backend, pool=pool)
                 sampler.run_mcmc(pos, niter, progress=True)
                 #for sample in sampler.sample(pos, iterations=niter, progress=True):
                 #    if sampler.iteration % 100:
@@ -281,8 +440,19 @@ class Clump:
         self.r = r0
         if profile == "Gaussian":
             self.theta = np.array([amp0, r0])
+        elif profile == "Gaussian-asym":
+            self.rx = r0
+            self.ry = r0
+            self.rot_angle = rot_angle = 0.
+            self.theta = np.array([amp0, r0, r0, rot_angle])
         elif profile == "Delta":
             self.theta = np.array([x0, y0, amp0])
+        elif profile == "Sersic":
+            n0 = 1.
+            self.n = n0
+            self.ellip = ellip = 0.
+            self.rot_angle = rot_angle = 0.
+            self.theta = np.array([amp0, r0, n0, ellip, rot_angle])
         self.fixed = False
         self.profile = profile
 
@@ -290,8 +460,14 @@ class Clump:
         if self.profile == 'Gaussian':
             return Gaussian2D(self.amp, x_mean=self.x, y_mean=self.y,
                                 x_stddev=self.r, y_stddev=self.r)
+        elif self.profile == 'Gaussian-asym':
+            return Gaussian2D(self.amp, x_mean=self.x, y_mean=self.y,
+                                x_stddev=self.rx, y_stddev=self.ry, theta=self.rot_angle)
         elif self.profile == 'Delta':
             return Delta2D(self.x, self.y, self.amp)
+        elif self.profile == 'Sersic':
+            return Sersic2D(self.amp, r_eff=self.r, n=self.n, x_0=self.x, y_0=self.y, 
+                            ellip=self.ellip, theta=self.rot_angle)
 
 
     def prior(self):
@@ -299,13 +475,26 @@ class Clump:
             if (self.amin < self.amp < self.amax and self.rmin < self.r < self.rmax):
                 return 0
             return -np.inf 
+        elif self.profile == "Gaussian-asym":
+            if (self.amin < self.amp < self.amax and self.rmin < self.rx < self.rmax and self.rmin < self.ry < self.rmax 
+                and self.rot_min <= self.rot_angle <= self.rot_max):
+                return 0
+            return -np.inf
         elif self.profile == "Delta":
             if (self.amin < self.amp < self.amax and self.xmin < self.x < self.xmax and self.ymin < self.y < self.ymax):
                 return 0
             return -np.inf
+        elif self.profile == "Sersic":
+            if (self.amin < self.amp < self.amax and self.rmin < self.r < self.rmax and self.nmin < self.n < self.nmax 
+                and self.emin < self.ellip < self.emax and self.rot_min <= self.rot_angle <= self.rot_max):
+                return 0
+            return -np.inf
 
 
-    def set_prior(self, amin=0, amax=1e10, rmin=0, rmax=1e10, xmin=0, xmax=1e10, ymin=0, ymax=1e10):
+    def set_prior(self, amin=0, amax=1e10, rmin=0, rmax=1e10, 
+                xmin=0, xmax=1e10, ymin=0, ymax=1e10, 
+                nmin=0, nmax=1e10, rot_min=0., rot_max=2*np.pi,
+                emin=0., emax=1.):
         self.amin = amin
         self.amax = amax
         self.rmin = rmin
@@ -314,7 +503,14 @@ class Clump:
         self.xmax = xmax
         self.ymin = ymin
         self.ymax = ymax
+        self.nmin = nmin
+        self.nmax = nmax
+        self.rot_min = rot_min
+        self.rot_max = rot_max 
+        self.emin = emin
+        self.emax = emax
 
+        
     def update(self, theta):
         if self.fixed:
             pass
@@ -323,10 +519,21 @@ class Clump:
             if self.profile == "Gaussian":
                 self.amp = theta[0]
                 self.r = theta[1]
+            elif self.profile == "Gaussian-asym":
+                self.amp = theta[0]
+                self.rx = theta[1]
+                self.ry = theta[2]
+                self.rot_angle = theta[3]
             elif self.profile == "Delta":
                 self.x = theta[0]
                 self.y = theta[1]
                 self.amp = theta[2]
+            elif self.profile == "Sersic":
+                self.amp=theta[0]
+                self.r = theta[1]
+                self.n = theta[2]
+                self.ellip = theta[3]
+                self.rot_angle = theta[4]
 
     def get_num_params(self):
         return len(self.theta)
