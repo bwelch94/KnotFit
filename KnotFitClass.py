@@ -57,7 +57,7 @@ def chisquared(theta, **kwargs):
     sigma = kwargs["sigma"]
     arcim = kwargs["arcim"]
     simim = np.zeros_like(arcim)
-    simim -= 4.
+    #simim -= 4.
     # make simulated knot
     conv = convolved(theta, **kwargs)
     simim[:,:] += conv[:,:] # add sim image to data image
