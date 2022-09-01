@@ -186,16 +186,19 @@ class GalModel:
             rmsf = fits.open(rmsfile)
             rms = rmsf[0].data
             rmscut = rms[self.ylo:self.yhi, self.xlo:self.xhi]
-            self.sigma = self.poisson(np.copy(self.arcim), 
+            sigma_0 = self.poisson(np.copy(self.arcim), 
                                       t_expose=exp_time, 
                                       unit=unit, 
                                       gain=gain, 
                                       photfnu=photfnu) + (rmscut*exp_time)
         else:
-            self.sigma = 0.01 * self.poisson(np.copy(self.arcim), 
+            sigma_0 = self.poisson(np.copy(self.arcim), 
                                       t_expose=exp_time, 
                                       gain=gain, 
-                                      photfnu=photfnu) + 0.01
+                                      photfnu=photfnu) 
+        ix = tuple([sigma_0 < 1e-99])
+        sigma_0[ix] = 1e-99
+        self.sigma = sigma_0
 
 
     def poisson(self, flux, t_expose=1, gain=1., unit='eps', photfnu=1e-8):
@@ -214,9 +217,9 @@ class GalModel:
         return result 
 
 
-    def min_fit(self, param0, method='Nelder-Mead', maxiter=5000):
+    def min_fit(self, param0, method='Nelder-Mead', options={'maxiter':5000, 'adaptive':True}):
         sol = minimize(self.neg_lhood, param0, method=method,
-                        options={'maxiter':maxiter})
+                        options=options)
         return sol
 
 
